@@ -1,4 +1,4 @@
-#include <stdint.h>
+#include <cstdint>
 #include <cstdio>
 
 #ifndef BIOS_H
@@ -17,7 +17,6 @@
 #define HASH_INCLUDABLE_ROOT		0x000000FE
 
 #define HASH_RESERVED				0x000000FF
-
 
 class Bios
 {

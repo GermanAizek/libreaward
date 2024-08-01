@@ -1,20 +1,217 @@
 #include "bios.h"
+#include "lzh.h"
+#include "award_exports.h"
+
+#include <ctime>
+#include <QMessageBox>
+
+typedef enum
+{
+    LAYOUT_UNKNOWN = 0,
+    LAYOUT_1_1_1,
+    LAYOUT_2_1_1,
+    LAYOUT_2_2_2
+} biosLayout;
+
+typedef struct
+{
+    bool		 modified;				// has this image been modified?
+    char		 fname[256];			// full path/name of image loaded
+    biosLayout	 layout;				// type of layout of the file table
+
+    uchar		*imageData;				// the loaded image
+    ulong		 imageSize;				// size of the loaded image (in bytes)
+
+    fileEntry	*fileTable;				// uncompressed data of all files
+    int			 fileCount;				// number of files in the file table
+    ulong		 tableOffset;			// offset of dynamic file table from start of image
+
+    ulong		 maxTableSize;			// maximum compressed size allowed in the file table
+} biosStruct;
+
+typedef struct updateEntry
+{
+    char	*path;
+    char	*fname;
+    time_t	lastWrite;
+
+    struct updateEntry	*next;
+} updateEntry;
+
+static updateEntry *updateList = NULL;
+static uint updateTimerID = 0;
+static bool updateIgnoreTimer = false;
+
+void biosAddToUpdateList(char *fname);
+void biosClearUpdateList(void);
+
+
+//static HINSTANCE hinst;
+//static HWND hwnd, statusWnd, treeView, hPropDlgListWnd, hModDlgWnd;
+//static HTREEITEM recgItem, inclItem, unkItem;
+//static RECT *dlgrc;
+static biosStruct biosdata;
+static ulong curHash;
+static ushort insertID;
+static fileEntry *curFileEntry;
+static bool ignoreNotify;
+static char *biosChangedText = "This BIOS image has been changed.  Do you want to save your changes before loading a new one?";
+static ulong biosFreeSpace;
+
+void biosRemoveEntry(fileEntry *toRemove);
+
 
 Bios::Bios() {}
+
+/*
+void biosUpdateCurrentDialog(void)
+{
+    //HWND hedit;
+    char buf[257];
+    ulong len, data;
+    ushort data16;
+    awdbeItem *item;
+
+    // first, update the data from our shared controls
+    if ((curFileEntry != NULL) && (hModDlgWnd != NULL))
+    {
+        hedit = GetDlgItem(hModDlgWnd, IDC_FILENAME);
+        if (IsWindow(hedit))
+        {
+            GetWindowText(hedit, buf, 256);
+            len = strlen(buf);
+
+            // compare strings
+            if ( (len != curFileEntry->nameLen) || memcmp(buf, curFileEntry->name, len) )
+            {
+                delete []curFileEntry->name;
+
+                curFileEntry->nameLen	= len;
+                curFileEntry->name		= new char[curFileEntry->nameLen + 1];
+                strcpy_s(curFileEntry->name, sizeof(curFileEntry->name), buf);
+
+                biosSetModified(TRUE);
+            }
+        }
+
+        hedit = GetDlgItem(hModDlgWnd, IDC_FILE_ID);
+        if (IsWindow(hedit))
+        {
+
+            GetWindowText(hedit, buf, 256);
+            sscanf_s(buf, "%hX", &data16);
+
+            // compare data
+            if (data16 != curFileEntry->type)
+            {
+                curFileEntry->type = data16;
+                biosSetModified(TRUE);
+
+                // since we changed the type ID of a component, we need to rebuild our list
+                biosUpdateComponents();
+            }
+        }
+
+        hedit = GetDlgItem(hModDlgWnd, IDC_FILE_OFFSET);
+        if (IsWindow(hedit))
+        {
+            GetWindowText(hedit, buf, 256);
+            sscanf_s(buf, "%08X", &data);
+
+            // compare data
+            if (data != curFileEntry->offset)
+            {
+                curFileEntry->offset = data;
+                biosSetModified(TRUE);
+            }
+        }
+    }
+
+    // next, call the plugin to update its own data
+    if (curHash > HASH_UNKNOWN_ITEM_MAX)
+    {
+        switch (curHash)
+        {
+        case HASH_SUBMENU_ITEM:
+        case HASH_RECOGNIZED_ROOT:
+        case HASH_UNKNOWN_ROOT:
+        case HASH_INCLUDABLE_ROOT:
+            // do nothing
+            break;
+
+        default:
+            // find the item that responds to this hash
+            item = pluginFindHash(curHash);
+            if (item == NULL)
+            {
+                snprintf(buf, sizeof(buf), "pluginFindHash() returned NULL for hash=%08Xh.  This hash value should be in the switch()...", curHash);
+                MessageBox(hwnd, buf, "Internal Error", MB_OK);
+                return;
+            }
+
+            // update only if the old item was *not* under the "includable" tree (curFileEntry will be NULL if under an includable item)
+            if (curFileEntry != NULL)
+            {
+                // call this plugin's update function
+                if (pluginCallUpdateDialog(item, curFileEntry, hModDlgWnd) == TRUE)
+                    biosSetModified(TRUE);
+            }
+            break;
+        }
+    }
+}
+*/
+
+bool biosHandleModified(char *text)
+{
+    // update any leftover data
+    // FIXME: maybe removed
+    // biosUpdateCurrentDialog();
+
+    // check the modified flag
+    if (biosdata.modified == false)
+        return true;
+
+    //res = MessageBox(hwnd, text, "Notice", MB_YESNOCANCEL);
+
+    QMessageBox msgBox;
+    msgBox.setText(text);
+    msgBox.setInformativeText("Notice");
+    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+    msgBox.setDefaultButton(QMessageBox::Yes);
+    int ret = msgBox.exec();
+
+    switch (ret)
+    {
+    case QMessageBox::Yes:
+        // save first
+        biosSave();
+        break;
+
+    case QMessageBox::No:
+        // do nothing
+        break;
+
+    case QMessageBox::Cancel:
+        return false;
+    }
+
+    return true;
+}
 
 bool biosOpenFile(char *fname)
 {
     FILE *fp;
-    unsigned char *ptr;
-    unsigned char _0xEA;
-    unsigned long count, _MRB;
-    HWND loaddlg, hwnd_loadtext, hwnd_loadprog;
+    uchar *ptr;
+    uchar _0xEA;
+    ulong count, _MRB;
+    //HWND loaddlg, hwnd_loadtext, hwnd_loadprog;
     lzhHeader *lzhhdr;
     lzhHeaderAfterFilename *lzhhdra;
     bool done;
     int curFile;
-    unsigned char *nextUpdate, *bootBlockData = NULL, *decompBlockData = NULL;
-    unsigned long bootBlockSize = 0, decompBlockSize = 0;
+    uchar *nextUpdate, *bootBlockData = NULL, *decompBlockData = NULL;
+    ulong bootBlockSize = 0, decompBlockSize = 0;
     fileEntry *fe;
 
     // warn if the current bios has been modified
