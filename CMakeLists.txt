@@ -23,6 +23,8 @@ add_executable(libreaward
   lzh.cpp
   award_exports.h
   types.h
+  memicmp.c
+  memicmp.h
 )
 target_link_libraries(libreaward Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Widgets)
 

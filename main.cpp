@@ -1,3 +1,5 @@
+#include "bios.h"
+
 #include <QCoreApplication>
 #include <QLocale>
 #include <QTranslator>
@@ -24,6 +26,9 @@ int main(int argc, char *argv[])
     parser.addVersionOption();
     parser.addPositionalArgument("source", QCoreApplication::translate("main", "Source .bin firmware BIOS (needed latest)"));
     parser.addPositionalArgument("destination", QCoreApplication::translate("main", "Destination modified .bin firmware BIOS (ready for flash rom)."));
+
+    Bios bios;
+    bios.args = parser.positionalArguments();
 
     qDebug() << "123";
 

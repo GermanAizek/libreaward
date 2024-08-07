@@ -1,5 +1,13 @@
+#include "award_exports.h"
+#include "memicmp.h"
+#include "lzh.h"
+
 #include <cstdint>
 #include <cstdio>
+#include <QString>
+#include <QMessageBox>
+#include <QDebug>
+#include <QStringList>
 
 #ifndef BIOS_H
 #define BIOS_H
@@ -18,10 +26,14 @@
 
 #define HASH_RESERVED				0x000000FF
 
+int MessageBox(const QString& text, const QString& titleText, QMessageBox::StandardButtons standartButtons,
+               QMessageBox::StandardButtons defaultButtons);
+
 class Bios
 {
 public:
     Bios();
+    QStringList args;
     void biosUpdateCurrentDialog(void);
     void biosRefreshCurrentDialog(void);
     bool biosHandleModified(char *text);
@@ -52,10 +64,9 @@ public:
     //void biosGetDialogSize(SIZE *sz);
     //void biosResizeDialog(SIZE sz);
 
-    //fileEntry *biosScanForID(uint16_t id);
+    fileEntry* biosScanForID(ushort id);
 
     void biosSetModified(bool val);
-    //awdbeBIOSVersion biosGetVersion(void);
 
     //void biosResizeCurrentDialog(HWND hwnd, RECT *rc);
 };

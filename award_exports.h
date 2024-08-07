@@ -1,6 +1,8 @@
 #ifndef AWDBE_EXPORTS
 #define AWDBE_EXPORTS
 
+#include "types.h"
+
 typedef struct
 {
     char	*name;					// name of this file (incl NULL terminator)

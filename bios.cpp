@@ -1,9 +1,7 @@
 #include "bios.h"
-#include "lzh.h"
-#include "award_exports.h"
 
 #include <ctime>
-#include <QMessageBox>
+#include <QFile>
 
 typedef enum
 {
@@ -43,8 +41,11 @@ static uint updateTimerID = 0;
 static bool updateIgnoreTimer = false;
 
 void biosAddToUpdateList(char *fname);
-void biosClearUpdateList(void);
+//void biosClearUpdateList(void);
 
+char exePath[256], fullTempPath[256];
+
+static char *mainChangedText = "This BIOS image has been changed.  Do you want to save your changes before exiting?";
 
 //static HINSTANCE hinst;
 //static HWND hwnd, statusWnd, treeView, hPropDlgListWnd, hModDlgWnd;
@@ -57,6 +58,27 @@ static fileEntry *curFileEntry;
 static bool ignoreNotify;
 static char *biosChangedText = "This BIOS image has been changed.  Do you want to save your changes before loading a new one?";
 static ulong biosFreeSpace;
+
+// More info about hack: https://forum.qt.io/topic/66906/qt5-convert-qstring-into-char-or-char/11
+char* QStrToCharArr(const QString& str)
+{
+    return str.toLatin1().data();
+}
+
+int SetWindowText(const QString& text)
+{
+    qDebug() << text;
+}
+
+int MessageBox(const QString& text, const QString& titleText, QMessageBox::StandardButtons standartButtons, QMessageBox::StandardButtons defaultButtons)
+{
+    QMessageBox msgBox;
+    msgBox.setText(text);
+    msgBox.setInformativeText("Notice");
+    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+    msgBox.setDefaultButton(QMessageBox::Yes);
+    return msgBox.exec();
+}
 
 void biosRemoveEntry(fileEntry *toRemove);
 
@@ -162,7 +184,399 @@ void biosUpdateCurrentDialog(void)
 }
 */
 
-bool biosHandleModified(char *text)
+fileEntry* Bios::biosScanForID(ushort id)
+{
+    fileEntry *fe = &biosdata.fileTable[0];
+    ulong count = biosdata.fileCount;
+
+    while (count--)
+    {
+        if (fe->type == id)
+            return fe;
+
+        fe++;
+    }
+
+    return NULL;
+}
+
+ulong biosWriteComponent(fileEntry* fe, FILE* fp, int fileIdx, bool compress)
+{
+    uchar* tempbuf = NULL;
+    ulong tempbufsize = 0, usedsize = 0, bytes_written = 0; // bw only counts lzh data
+    lzhErr err;
+    lzhHeader* lzhhdr = NULL;
+    uchar csum = 0, * cptr = NULL, ebcount = 0;
+    ulong clen = 0;
+
+    // alloc a temp buffer for compression (assume file can't be compressed at all)
+    tempbufsize = fe->size;
+    tempbuf = new uchar[tempbufsize + sizeof(lzhHeader) + sizeof(lzhHeaderAfterFilename) + 256];
+
+    if (compress) {
+        // compress this file
+        err = lzhCompress(fe->name, fe->nameLen, fe->data, fe->size, tempbuf, tempbufsize, &usedsize);
+    } else {
+        memcpy(tempbuf, fe->data, fe->size);
+        usedsize = fe->size;
+    }
+
+    // update the type and then fix the header sum
+    lzhhdr = (lzhHeader *)tempbuf;
+    lzhhdr->fileType  = fe->type;
+    lzhhdr->headerSum = lzhCalcSum(tempbuf + 2, lzhhdr->headerSize);
+
+    // write it to the output
+    fwrite(tempbuf, 1, usedsize, fp);
+    bytes_written += usedsize;
+
+
+    // calculate checksum over LZH header and compressed data
+    cptr = tempbuf;
+    clen = usedsize;
+    csum = 0x00;
+    while (clen--)
+        csum += *cptr++;
+
+    // write extra bytes, depending on the layout
+    if (fileIdx != -1)
+    {
+        switch (biosdata.layout)
+        {
+        case LAYOUT_2_2_2:
+            ebcount = 2;
+            break;
+
+        case LAYOUT_2_1_1:
+            if (fileIdx == 0)
+                ebcount = 2;
+            else
+                ebcount = 1;
+            break;
+
+        case LAYOUT_1_1_1:
+            ebcount = 1;
+            break;
+        }
+    }
+    else
+    {
+        // always write 2 extra bytes
+        ebcount = 2;
+    }
+
+    if (ebcount > 0)
+    {
+        fputc(0x00, fp);
+        if (ebcount > 1) {
+            fputc(csum, fp);
+        }
+    }
+
+    ulong bs = lzhhdr->headerSize + lzhhdr->compressedSize;
+
+    // free our buffer
+    delete[] tempbuf;
+
+    return bs;
+}
+
+fileEntry *biosScanForID(ushort id)
+{
+    fileEntry *fe = &biosdata.fileTable[0];
+    ulong count = biosdata.fileCount;
+
+    while (count--)
+    {
+        if (fe->type == id)
+            return fe;
+
+        fe++;
+    }
+
+    return NULL;
+}
+
+awdbeBIOSVersion biosGetVersion(void)
+{
+    awdbeBIOSVersion vers = awdbeBIOSVerUnknown;
+    fileEntry *fe;
+    uchar *sptr;
+    int len;
+
+    fe = biosScanForID(0x5000);
+    if (fe == NULL)
+        return vers;
+
+    // get the bios's version
+    sptr = ((uchar *)fe->data) + 0x1E060;
+    len  = (*sptr++) - 1;
+
+    while (len--)
+    {
+        if (!strncmp((const char*)sptr, "v4.50PG", 7) || !strncmp((const char*)sptr, "v4.51PG", 7))
+        {
+            vers = awdbeBIOSVer451PG;
+            len  = 0;
+        }
+        else if (!strncmp((const char*)sptr, "v6.00PG", 7))
+        {
+            vers = awdbeBIOSVer600PG;
+            len  = 0;
+        }
+        else if (!strncmp((const char*)sptr, "v6.0", 4))
+        {
+            vers = awdbeBIOSVer60;
+            len  = 0;
+        }
+        else
+        {
+            sptr++;
+        }
+    }
+
+    return vers;
+}
+
+#define DEBUG(blob)
+
+bool biosSaveFile(char* fname)
+{
+    //HWND loaddlg, hwnd_loadtext, hwnd_loadprog;
+    int t, pos, count;
+    fileEntry* fe;
+    ulong decompSize, bootSize;
+    uchar ch, csum1, csum2, rcs1, rcs2;
+    ulong new_size = 0, old_size = 0;
+    char buf[257];
+
+    // open the file
+    FILE* fp = fopen64(fname, "wb");
+    FILE* tp;
+    DEBUG(tp = fopen64("temp", "wb");)
+    if (fp == NULL || tp == NULL)
+    {
+
+        MessageBox("Unable to write BIOS image!", "Error", QMessageBox::Ok, QMessageBox::Ok);
+        return false;
+    }
+
+    // todo: rewrite to cli progress saving
+    // put up our saving dialog and initialize it
+    //loaddlg = CreateDialog(hinst, MAKEINTRESOURCE(IDD_WORKING), hwnd, (DLGPROC)LoadSaveProc);
+
+    SetWindowText("Saving Image...");
+    //hwnd_loadtext = GetDlgItem(loaddlg, IDC_LOADING_TEXT);
+    //hwnd_loadprog = GetDlgItem(loaddlg, IDC_LOADING_PROGRESS);
+
+    SetWindowText("Writing components...");
+    //SendMessage(hwnd_loadprog, PBM_SETRANGE32, 0, biosdata.fileCount);
+
+    // first, flat out write the loaded image to restore extra code/data segments we couldn't load
+    // note: this leaves in place data not overwritten due to shorter files!
+    fwrite(biosdata.imageData, 1, biosdata.imageSize, fp);
+    DEBUG(fwrite(biosdata.imageData, 1, biosdata.imageSize, tp);)
+    rewind(fp);
+    DEBUG(rewind(tp);)
+
+    // fill in FFh until we reach the start of the file table
+    t = biosdata.tableOffset;
+    while (t--) {
+        fputc(0xFF, fp);
+        DEBUG(fputc(0xFF, tp);)
+    }
+
+
+    // iterate through all files with no fixed offset and no special flags, compress them, and write them
+    for (t = 0; t < biosdata.fileCount; t++)
+    {
+        //SendMessage(hwnd_loadprog, PBM_SETPOS, t, 0);
+
+        fe = &biosdata.fileTable[t];
+        if ((fe->offset == 0) && (fe->flags == 0))
+        {
+            old_size += fe->originalSize;
+            new_size += biosWriteComponent(fe, fp, t, true);
+            DEBUG(biosWriteComponent(fe, tp, t, false);)
+        }
+    }
+
+    if (new_size < old_size) {
+        // new file is smaller than original, can happen if more compressable
+        // padd with 0xff
+        size_t diff = old_size - new_size;
+        unsigned char* padd = (unsigned char*)malloc(diff);
+        if (NULL != padd) {
+            memset(padd, 0xff, diff);
+            fwrite(padd, 1, diff, fp);
+            free(padd);
+        } // ignore, we see what happens ...
+    }
+
+    // write the decompression and boot blocks...
+    SetWindowText("Writing boot/decomp blocks...");
+
+    fe = biosScanForID(TYPEID_DECOMPBLOCK);
+    decompSize = ((fe == NULL) ? (0) : (fe->size));
+
+    fe = biosScanForID(TYPEID_BOOTBLOCK);
+    bootSize = ((fe == NULL) ? (0) : (fe->size));
+
+    fseek(fp, biosdata.imageSize - (decompSize + bootSize), 0);
+    DEBUG(fseek(tp, biosdata.imageSize - (decompSize + bootSize), 0);)
+
+    // write the blocks
+    fe = biosScanForID(TYPEID_DECOMPBLOCK);
+    if (fe != NULL) {
+        fwrite(fe->data, 1, fe->size, fp);
+        DEBUG(fwrite(fe->data, 1, fe->size, tp);)
+    }
+
+    fe = biosScanForID(TYPEID_BOOTBLOCK);
+    if (fe != NULL) {
+        fwrite(fe->data, 1, fe->size, fp);
+        DEBUG(fwrite(fe->data, 1, fe->size, tp);)
+    }
+
+    // now write components which have a fixed offset
+    SetWindowText("Writing fixed components...");
+
+    for (t = 0; t < biosdata.fileCount; t++)
+    {
+        //SendMessage(hwnd_loadprog, PBM_SETPOS, t, 0);
+
+        fe = &biosdata.fileTable[t];
+        if (fe->offset != 0)
+        {
+            fseek(fp, fe->offset, SEEK_SET);
+            biosWriteComponent(fe, fp, -1, true);
+            DEBUG(fseek(tp, fe->offset, SEEK_SET);)
+            DEBUG(biosWriteComponent(fe, fp, -1, FALSE);)
+        }
+    }
+
+    // finally, if the BIOS is version 6.00PG, update the internal checksum in the decompression block...
+    if (biosGetVersion() == awdbeBIOSVer600PG)
+    {
+        fe = biosScanForID(TYPEID_DECOMPBLOCK);
+        if (fe != NULL)
+        {
+            // re-open the file in read-only mode
+            fclose(fp);
+            fp = fopen64(fname, "rb");
+
+            if (NULL == fp) {
+                goto end;
+            }
+            // calculate the position of the checksum bytes
+            pos = ((biosdata.imageSize - (decompSize + bootSize)) & 0xFFFFF000) + 0xFFE;
+
+            //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            // calculate the checksum
+            csum1 = 0x00;
+            csum2 = 0xF8; //0x6E;
+            count = pos;
+
+            while (count--)
+            {
+                ch = fgetc(fp);
+                csum1 += ch;
+                csum2 += ch;
+            }
+
+#if 0
+            rcs1 = fgetc(fp);
+            rcs2 = fgetc(fp);
+
+            snprintf(buf, 256, "Current checksum: %02X %02X\nCalculated checksum: %02X %02X", rcs1, rcs2, csum1, csum2);
+            MessageBox(hwnd, buf, "Notice", MB_OK);
+#else
+
+            // re-open the file in read-write mode
+            fclose(fp);
+            fp = fopen64(fname, "r+b");
+
+            if (NULL == fp) goto end;
+            // seek to the checksum position
+            fseek(fp, pos, 0);
+
+            // write the checksum bytes
+            fputc(csum1, fp);
+            fputc(csum2, fp);
+#endif
+            //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        }
+    }
+
+    // close the file
+    fclose(fp);
+    DEBUG(fclose(tp);)
+
+end:
+    // kill our window
+    //DestroyWindow(loaddlg);
+
+    return true;
+}
+
+void Bios::biosTitleUpdate(void)
+{
+    char buf[256];
+    int t;
+    ulong size;
+    fileEntry *fe;
+
+    snprintf(buf, 256, "%s - [%s%s", APP_VERSION, biosdata.fname, (biosdata.modified == true) ? " *]" : "]");
+    SetWindowText(buf);
+
+    // go through all files in the table with an offset of 0 and calculate a total size
+    size = 0;
+
+    for (t = 0; t < biosdata.fileCount; t++)
+    {
+        fe = &biosdata.fileTable[t];
+
+        if (fe->offset == 0)
+            size += fe->compSize;
+    }
+
+    snprintf(buf, 256, "Used: %dK/%dK", size / 1024, biosdata.maxTableSize / 1024);
+    SetWindowText(buf);
+    //SendMessage(statusWnd, SB_SETTEXT, 1, (LPARAM)buf);
+
+    // set the global free size while we're at it...
+    biosFreeSpace = biosdata.maxTableSize - size;
+}
+
+bool Bios::biosSave(void)
+{
+    bool ret;
+
+    // update any current data
+    // FIXME: maybe removed
+    //biosUpdateCurrentDialog();
+
+    // zap the modified flag
+    biosdata.modified = false;
+
+    // and call the save file handler...
+    ret = biosSaveFile(biosdata.fname);
+
+    // if successful, update the title bar (removes the * mark)
+    if (ret == true)
+        biosTitleUpdate();
+
+    // return result
+    return ret;
+}
+
+void Bios::biosSetModified(bool val)
+{
+    biosdata.modified = val;
+    biosTitleUpdate();
+}
+
+bool Bios::biosHandleModified(char *text)
 {
     // update any leftover data
     // FIXME: maybe removed
@@ -172,14 +586,8 @@ bool biosHandleModified(char *text)
     if (biosdata.modified == false)
         return true;
 
-    //res = MessageBox(hwnd, text, "Notice", MB_YESNOCANCEL);
 
-    QMessageBox msgBox;
-    msgBox.setText(text);
-    msgBox.setInformativeText("Notice");
-    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
-    msgBox.setDefaultButton(QMessageBox::Yes);
-    int ret = msgBox.exec();
+    int ret = MessageBox(text, "Notice", QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::Yes);
 
     switch (ret)
     {
@@ -198,8 +606,218 @@ bool biosHandleModified(char *text)
 
     return true;
 }
+/*
+awdbeItem *pluginFindHash(ulong hash)
+{
+    awdbeItemEntry *ie = itemMenuList;
+    awdbeItem *item;
+    ulong count;
 
-bool biosOpenFile(char *fname)
+    // iterate through each item list, looking for a matching hash
+    while (ie != NULL)
+    {
+        item  = ie->list;
+        count = ie->count;
+
+        while (count--)
+        {
+            if (item->hash == hash)
+            {
+                // found it!
+                return item;
+            }
+
+            item++;
+        }
+
+        ie = ie->next;
+    }
+
+    return NULL;
+}
+*/
+void Bios::biosFreeMemory(void)
+{
+    int t;
+    fileEntry *fe;
+    awdbeItem *item;
+
+    // if the current hash points to a plugin, call it's "onDestroy" function to tell it it's about to be killed
+    if ((curFileEntry != NULL) && (curHash > HASH_UNKNOWN_ITEM_MAX))
+    {
+        switch (curHash)
+        {
+        case HASH_SUBMENU_ITEM:
+        case HASH_RECOGNIZED_ROOT:
+        case HASH_UNKNOWN_ROOT:
+        case HASH_INCLUDABLE_ROOT:
+            break;
+
+        default:
+            // TODO: rewrite and detect functionality
+            // find the item that responds to this hash
+            /*
+            item = pluginFindHash(curHash);
+            if (item != NULL)
+            {
+                // call this plugin's create dialog function to show the window
+                pluginCallOnDestroyDialog(item, hModDlgWnd);
+            }
+            */
+            break;
+        }
+    }
+
+    if (biosdata.fileTable != NULL)
+    {
+        for (t = 0; t < biosdata.fileCount; t++)
+        {
+            fe = &biosdata.fileTable[t];
+            delete []fe->name;
+            delete []fe->data;
+        }
+
+        delete []biosdata.fileTable;
+        biosdata.fileTable = NULL;
+    }
+
+    if (biosdata.imageData != NULL)
+    {
+        delete []biosdata.imageData;
+        biosdata.imageData = NULL;
+    }
+}
+
+fileEntry* biosExpandTable(void)
+{
+    fileEntry *tempTable;
+
+    // first, store the current table
+    tempTable = biosdata.fileTable;
+
+    // increase the file count and alloc a new one
+    biosdata.fileCount++;
+    biosdata.fileTable = new fileEntry[biosdata.fileCount];
+
+    // copy the existing file table into the new one
+    memcpy(biosdata.fileTable, tempTable, (biosdata.fileCount - 1) * sizeof(fileEntry));
+
+    // delete the old table
+    delete []tempTable;
+
+    // return a pointer to the new entry, but zap its memory first...
+    tempTable = &biosdata.fileTable[biosdata.fileCount - 1];
+    memset(tempTable, 0, sizeof(fileEntry));
+
+    return tempTable;
+}
+
+void biosWriteEntry(fileEntry *fe, lzhHeader *lzhhdr, ulong offset)
+{
+    ushort crc;
+    lzhHeaderAfterFilename *lzhhdra;
+
+    lzhhdra = (lzhHeaderAfterFilename *) ((lzhhdr->filename) + lzhhdr->filenameLen);
+
+    fe->nameLen = lzhhdr->filenameLen;
+    fe->name = new char[fe->nameLen + 1];
+    memcpy(fe->name, lzhhdr->filename, fe->nameLen);
+    fe->name[fe->nameLen] = 0;
+
+    fe->size	 = lzhhdr->originalSize;
+    fe->compSize = lzhhdr->compressedSize;
+    fe->originalSize = lzhhdr->compressedSize + lzhhdr->headerSize;
+    fe->type	 = lzhhdr->fileType;
+    fe->crc		 = lzhhdra->crc;
+    fe->data	 = (void *)new uchar[fe->size];
+    fe->offset	 = offset;
+    fe->flags	 = 0;
+
+    // decompress file
+    if (lzhExpand(lzhhdr, fe->data, fe->size, &crc) != LZHERR_OK)
+    {
+        // error extracting
+        MessageBox("Error extracting component!\n\nThis BIOS Image may be corrupted or damaged.  The editor will still continue to load\nthe image, but certain components may not be editable.",
+                   "Notice", QMessageBox::Ok, QMessageBox::Ok);
+    }
+    else
+    {
+        if (fe->crc != crc)
+        {
+            // CRC failed
+            fe->crcOK = false;
+
+            MessageBox("CRC check failed!\n\nThis BIOS Image may be corrupted or damaged.  The editor will still continue to load\nthe image, but certain components may not be editable.",
+                       "Notice", QMessageBox::Ok, QMessageBox::Ok);
+        }
+        else
+        {
+            fe->crcOK = true;
+        }
+    }
+}
+/*
+void cleanTempPath(void)
+{
+    char cwd[256];
+    long hFile;
+    struct _finddata_t fd;
+
+    // save the current path
+    _getcwd(cwd, 256);
+
+    // change into the temp dir
+    if (_chdir(fullTempPath) < 0)
+    {
+        // some error occured changing into our temp dir.  we don't want to destroy any files here!
+        snprintf(cwd, 256, "Unable to clean temporary files dir: [%s]", fullTempPath);
+        MessageBox(cwd, "Internal Error", QMessageBox::Ok, QMessageBox::Ok);
+        return;
+    }
+
+    // iterate through all files, and delete them
+    hFile = _findfirst("*.*", &fd);
+    if (hFile != -1)
+    {
+        do
+        {
+            // ignore directories
+            if (fd.attrib != _A_SUBDIR)
+                _unlink(fd.name);
+        } while (_findnext(hFile, &fd) == 0);
+
+        _findclose(hFile);
+    }
+
+    // return back
+    _chdir(cwd);
+}
+
+void makeTempPath(void)
+{
+    char *tmp = NULL;
+    size_t tmp_len = 0;
+    errno_t err;
+
+    // try to get the system temp path
+
+    err = _dupenv_s(&tmp, &tmp_len, "Temp");
+    if (tmp == NULL || err) tmp = "C:\\TEMP";
+
+    // make sure it exists (it really should...)
+    _mkdir(tmp);
+
+    // split off a directory for us
+    snprintf(fullTempPath, 256, "%s\\Award BIOS Editor Temp Files", tmp);
+
+    // make sure this exists too
+    _mkdir(fullTempPath);
+
+    // now cleanup the temp path...
+    cleanTempPath();
+}
+*/
+bool Bios::biosOpenFile(char *fname)
 {
     FILE *fp;
     uchar *ptr;
@@ -215,18 +833,18 @@ bool biosOpenFile(char *fname)
     fileEntry *fe;
 
     // warn if the current bios has been modified
-    if (biosHandleModified(biosChangedText) == FALSE)
-        return FALSE;
+    if (biosHandleModified(biosChangedText) == false)
+        return false;
 
     // stop update checking for this image
-    biosClearUpdateList();
+    //biosClearUpdateList();
 
     // open the image
-    fopen_s(&fp, fname, "rb");
+    fp = fopen64(fname, "rb");
     if (fp == NULL)
     {
-        MessageBox(hwnd, "Unable to open BIOS image!", "Error", MB_OK);
-        return FALSE;
+        MessageBox("Unable to open BIOS image!", "Error", QMessageBox::Ok, QMessageBox::Ok);
+        return false;
     }
 
     // check if this is a real bios image
@@ -241,31 +859,32 @@ bool biosOpenFile(char *fname)
 
     if ((_0xEA != 0xEA) || (_MRB != 'BRM*') || ((biosdata.imageSize % 1024) != 0) || (biosdata.imageSize > (1024 * 1024)))
     {
-        if (MessageBox(hwnd, "This image does not appear to be a valid Award BIOS image.\n\n"
-                             "Do you wish to attempt to continue to loading anyway?", "Notice", MB_YESNO) == IDNO)
+        if (MessageBox("This image does not appear to be a valid Award BIOS image.\n\nDo you wish to attempt to continue to loading anyway?",
+                       "Notice", QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::No)
         {
             fclose(fp);
-            return FALSE;
+            return false;
         }
     }
 
     // looks okay from here...
     count = biosdata.imageSize / 1024;
-    strcpy_s(biosdata.fname, sizeof(biosdata.fname), fname);
+    strncpy(biosdata.fname, fname, sizeof(biosdata.fname));
 
     // free any already allocated memory
     biosFreeMemory();
 
     // put up our loading dialog and initialize it
-    loaddlg = CreateDialog(hinst, MAKEINTRESOURCE(IDD_WORKING), hwnd, (DLGPROC)LoadSaveProc);
+    // TODO: create loading image bios progress
+    //loaddlg = CreateDialog(hinst, MAKEINTRESOURCE(IDD_WORKING), hwnd, (DLGPROC)LoadSaveProc);
 
-    SetWindowText(loaddlg, "Loading Image...");
-    hwnd_loadtext = GetDlgItem(loaddlg, IDC_LOADING_TEXT);
-    hwnd_loadprog = GetDlgItem(loaddlg, IDC_LOADING_PROGRESS);
+    SetWindowText("Loading Image...");
+    //hwnd_loadtext = GetDlgItem(loaddlg, IDC_LOADING_TEXT);
+    //hwnd_loadprog = GetDlgItem(loaddlg, IDC_LOADING_PROGRESS);
 
-    SetWindowText(hwnd_loadtext, "Loading image into memory...");
-    SendMessage(hwnd_loadprog, PBM_SETRANGE, 0, MAKELPARAM(0, count));
-    SendMessage(hwnd_loadprog, PBM_SETSTEP, 1, 0);
+    SetWindowText("Loading image into memory...");
+    //SendMessage(hwnd_loadprog, PBM_SETRANGE, 0, MAKELPARAM(0, count));
+    //SendMessage(hwnd_loadprog, PBM_SETSTEP, 1, 0);
 
     // allocate space and load the image into memory
     biosdata.imageData = new uchar[biosdata.imageSize];
@@ -275,7 +894,7 @@ bool biosOpenFile(char *fname)
 
     while (count--)
     {
-        SendMessage(hwnd_loadprog, PBM_STEPIT, 0, 0);
+        //SendMessage(hwnd_loadprog, PBM_STEPIT, 0, 0);
 
         fread(ptr, 1024, 1, fp);
         ptr += 1024;
@@ -285,7 +904,7 @@ bool biosOpenFile(char *fname)
     fclose(fp);
 
     // scan for the boot and decompression blocks, and extract them
-    SetWindowText(hwnd_loadtext, "Scanning for Boot Block...");
+    SetWindowText("Scanning for Boot Block...");
 
     ptr	  = biosdata.imageData;
     count = biosdata.imageSize;
@@ -294,7 +913,8 @@ bool biosOpenFile(char *fname)
 
     while (count--)
     {
-        if (!_memicmp(ptr, bootBlockString, 20))
+        // FIXME: MAIN PROBLEM SUCCESSFUL BUILDING
+        if (!_memicmp((const void*)ptr, (const void*)bootBlockString, (size_t)20))
         {
             bootBlockSize = biosdata.imageSize - (ptr - biosdata.imageData);
             bootBlockData = new uchar[bootBlockSize];
@@ -308,13 +928,12 @@ bool biosOpenFile(char *fname)
 
     if (bootBlockData == NULL)
     {
-        MessageBox(hwnd, "Unable to locate the Boot Block within the BIOS Image!\n\n"
-                         "The editor will still be able to modify this image, but this component will be\n"
-                         "unaccessable.  Re-flashing with a saved version of this BIOS is NOT RECOMMENDED!", "Notice", MB_OK);
+        MessageBox("Unable to locate the Boot Block within the BIOS Image!\n\nThe editor will still be able to modify this image, but this component will be\nunaccessable.  Re-flashing with a saved version of this BIOS is NOT RECOMMENDED!",
+                   "Notice", QMessageBox::Ok, QMessageBox::Ok);
     }
 
     // next, decompression block...
-    SetWindowText(hwnd_loadtext, "Scanning for Decompression Block...");
+    SetWindowText("Scanning for Decompression Block...");
 
     ptr	  = biosdata.imageData;
     count = biosdata.imageSize;
@@ -335,9 +954,8 @@ bool biosOpenFile(char *fname)
 
     if (decompBlockData == NULL)
     {
-        MessageBox(hwnd, "Unable to locate the Decompression Block within the BIOS Image!\n\n"
-                         "The editor will still be able to modify this image, but this component will be\n"
-                         "unaccessable.  Re-flashing with a saved version of this BIOS is NOT RECOMMENDED!", "Notice", MB_OK);
+        MessageBox("Unable to locate the Decompression Block within the BIOS Image!\n\nThe editor will still be able to modify this image, but this component will be\nunaccessable.  Re-flashing with a saved version of this BIOS is NOT RECOMMENDED!",
+                   "Notice", QMessageBox::Ok, QMessageBox::Ok);
     }
 
     // load the file table
@@ -345,13 +963,13 @@ bool biosOpenFile(char *fname)
     biosdata.fileCount	 = 0;
     biosdata.tableOffset = 0xDEADBEEF;
 
-    SetWindowText(hwnd_loadtext, "Parsing File Table...");
-    SendMessage(hwnd_loadprog, PBM_SETRANGE32, 0, biosdata.imageSize);
-    SendMessage(hwnd_loadprog, PBM_SETPOS, 0, 0);
+    SetWindowText("Parsing File Table...");
+    //SendMessage(hwnd_loadprog, PBM_SETRANGE32, 0, biosdata.imageSize);
+    //SendMessage(hwnd_loadprog, PBM_SETPOS, 0, 0);
 
     // first, determine the offset of the file table
     ptr  = biosdata.imageData;
-    done = FALSE;
+    done = false;
 
     nextUpdate = ptr + 1024;
 
@@ -360,52 +978,49 @@ bool biosOpenFile(char *fname)
         if (!memcmp(ptr + 2, "-lh", 3))
         {
             biosdata.tableOffset = (ptr - biosdata.imageData);
-            done = TRUE;
+            done = true;
         }
         else
         {
             if ((ulong)(ptr - biosdata.imageData) >= biosdata.imageSize)
-                done = TRUE;
+                done = true;
         }
 
         ptr++;
 
         if (ptr >= nextUpdate)
         {
-            SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
+            //SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
             nextUpdate = ptr + 1024;
         }
     }
 
     if (biosdata.tableOffset == 0xDEADBEEF)
     {
-        MessageBox(hwnd, "Unable to locate a file table within the BIOS image!\n"
-                         "It is possible that this version of the editor simply does not support this type.\n\n"
-                         "Please check the homepage listed under Help->About and see if a new version is\n"
-                         "available for download.", "Error", MB_OK);
+        MessageBox("Unable to locate a file table within the BIOS image!\nIt is possible that this version of the editor simply does not support this type.\n\nPlease check the homepage listed under Help->About and see if a new version is\navailable for download.",
+                   "Error", QMessageBox::Ok, QMessageBox::Ok);
 
-        DestroyWindow(loaddlg);
-        return TRUE;
+        return true;
     }
 
-    SendMessage(hwnd_loadprog, PBM_SETPOS, 0, 0);
+    //SendMessage(hwnd_loadprog, PBM_SETPOS, 0, 0);
 
     // next, determine the total size of the file table and file count, and try to determine the layout
     ptr  = biosdata.imageData + biosdata.tableOffset;
-    done = FALSE;
+    done = false;
     while (!done)
     {
         lzhhdr  = (lzhHeader *)ptr;
         lzhhdra = (lzhHeaderAfterFilename *) ((lzhhdr->filename) + lzhhdr->filenameLen);
 
         if ((lzhhdr->headerSize == 0) || (lzhhdr->headerSize == 0xFF))
-            done = TRUE;
+            done = true;
         else
         {
             if (lzhCalcSum(ptr + 2, lzhhdr->headerSize) != lzhhdr->headerSum)
             {
-                MessageBox(hwnd, "BIOS Image Checksum failed!\n\nThis BIOS Image may be corrupted or damaged.  The editor will still continue to load\n"
-                                 "the image, but certain components may not be editable.", "Notice", MB_OK);
+                MessageBox("BIOS Image Checksum failed!\n\nThis BIOS Image may be corrupted or damaged.  The editor will still continue to load\nthe image, but certain components may not be editable.",
+                           "Notice", QMessageBox::Ok, QMessageBox::Ok);
             }
 
             // advance to next file
@@ -507,32 +1122,29 @@ bool biosOpenFile(char *fname)
             }
         }
 
-        SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
+        //SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
     }
 
     // check for a valid layout
     if (biosdata.layout == LAYOUT_UNKNOWN)
     {
-        MessageBox(hwnd, "Unable to determine the layout of the file table within the BIOS Image!\n"
-                         "It is possible that this version of the editor simply does not support this type.\n\n"
-                         "Please check the homepage listed under Help->About and see if a new version is\n"
-                         "available for download.", "Error", MB_OK);
+        MessageBox("Unable to determine the layout of the file table within the BIOS Image!\nIt is possible that this version of the editor simply does not support this type.\n\nPlease check the homepage listed under Help->About and see if a new version is\navailable for download.",
+                   "Error", QMessageBox::Ok, QMessageBox::Ok);
 
-        DestroyWindow(loaddlg);
-        return TRUE;
+        return true;
     }
 
     // allocate our file table space...
-    SetWindowText(hwnd_loadtext, "Loading File Table...");
-    SendMessage(hwnd_loadprog, PBM_SETRANGE32, 0, biosdata.imageSize);
-    SendMessage(hwnd_loadprog, PBM_SETPOS, 0, 0);
+    SetWindowText("Loading File Table...");
+    //SendMessage(hwnd_loadprog, PBM_SETRANGE32, 0, biosdata.imageSize);
+    //SendMessage(hwnd_loadprog, PBM_SETPOS, 0, 0);
 
     biosdata.fileTable = new fileEntry[biosdata.fileCount];
 
     // decompress and load the file table into memory...
     ptr		= biosdata.imageData + biosdata.tableOffset;
     curFile = 0;
-    done	= FALSE;
+    done	= false;
 
     while (!done)
     {
@@ -541,7 +1153,7 @@ bool biosOpenFile(char *fname)
 
         if ((lzhhdr->headerSize == 0) || (lzhhdr->headerSize == 0xFF))
         {
-            done = TRUE;
+            done = true;
         }
         else
         {
@@ -578,14 +1190,14 @@ bool biosOpenFile(char *fname)
             curFile++;
         }
 
-        SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
+        //SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
     }
 
     // calculate available table space
     biosdata.maxTableSize = (biosdata.imageSize - biosdata.tableOffset) - (decompBlockSize + bootBlockSize);
 
     // scan for fixed-offset components
-    SetWindowText(hwnd_loadtext, "Scanning for fixed components...");
+    SetWindowText("Scanning for fixed components...");
 
     // continue until we hit the end of the image
     nextUpdate = ptr + 1024;
@@ -622,7 +1234,7 @@ bool biosOpenFile(char *fname)
 
         if (ptr >= nextUpdate)
         {
-            SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
+            //SendMessage(hwnd_loadprog, PBM_SETPOS, (WPARAM)(ptr - biosdata.imageData), 0);
             nextUpdate = ptr + 1024;
         }
     }
@@ -632,14 +1244,14 @@ bool biosOpenFile(char *fname)
     {
         fe = biosExpandTable();
         fe->nameLen = strlen("decomp_blk.bin");
-        fe->name = new char[max(fe->nameLen + 1, 4)];
-        strcpy_s(fe->name, max(fe->nameLen + 1, 4), "decomp_blk.bin");
+        fe->name = new char[std::max(fe->nameLen + 1, (ulong)4)];
+        strncpy(fe->name, "decomp_blk.bin", std::max(fe->nameLen + 1, (ulong)4));
 
         fe->size	 = decompBlockSize;
         fe->compSize = 0;
         fe->type	 = TYPEID_DECOMPBLOCK;
         fe->crc		 = 0;
-        fe->crcOK	 = TRUE;
+        fe->crcOK	 = true;
         fe->data	 = (void *)new uchar[fe->size];
         fe->offset	 = 0;
         fe->flags	 = FEFLAGS_DECOMP_BLOCK;
@@ -652,14 +1264,14 @@ bool biosOpenFile(char *fname)
     {
         fe = biosExpandTable();
         fe->nameLen = strlen("boot_blk.bin");
-        fe->name = new char[max(fe->nameLen + 1, 4)];
-        strcpy_s(fe->name, max(fe->nameLen + 1, 4), "boot_blk.bin");
+        fe->name = new char[std::max(fe->nameLen + 1, (ulong)4)];
+        strncpy(fe->name, "boot_blk.bin", std::max(fe->nameLen + 1, (ulong)4));
 
         fe->size	 = bootBlockSize;
         fe->compSize = 0;
         fe->type	 = TYPEID_BOOTBLOCK;
         fe->crc		 = 0;
-        fe->crcOK	 = TRUE;
+        fe->crcOK	 = true;
         fe->data	 = (void *)new uchar[fe->size];
         fe->offset	 = 0;
         fe->flags	 = FEFLAGS_BOOT_BLOCK;
@@ -669,63 +1281,44 @@ bool biosOpenFile(char *fname)
     }
 
     // kill our window
-    DestroyWindow(loaddlg);
+    //DestroyWindow(loaddlg);
 
     // enable all editing controls
-    enableControls(TRUE, TRUE);
+    //enableControls(true, true);
 
     // call all plugins' onLoad functions
-    pluginCallOnLoad(biosdata.fileTable, biosdata.fileCount);
+    //pluginCallOnLoad(biosdata.fileTable, biosdata.fileCount);
 
     // populate the component list with the files in our table
-    biosUpdateComponents();
+    // FIXME: undetected functionality
+    //biosUpdateComponents();
 
     // zap the modified flag and update our main window's title and status bar...
-    biosSetModified(FALSE);
+    biosSetModified(false);
 
     // and cleanup our temp directory!
-    cleanTempPath();
+    // TODO: fix for Linux
+    //cleanTempPath();
 
-    return TRUE;
+    return true;
 }
 
-bool biosOpen(void)
+bool Bios::biosOpen(void)
 {
-    OPENFILENAME ofn;
-    char fname[256], *sptr, *dptr;
+    char fname[256]; //, *sptr, *dptr;
 
     // warn if the current bios has been modified
-    if (biosHandleModified(biosChangedText) == FALSE)
-        return FALSE;
+    if (biosHandleModified(biosChangedText) == false)
+        return false;
 
     // display the open dialog
-    fname[0] = 0;
-    ZeroMemory(&ofn, sizeof(OPENFILENAME));
-    ofn.lStructSize			= sizeof(OPENFILENAME);
-    ofn.hwndOwner			= hwnd;
-    ofn.hInstance			= hinst;
-    ofn.lpstrFilter			= "Award BIOS Image (*.awd,*.bin)\0*.awd;*.bin\0All Files (*.*)\0*.*\0\0";
-    ofn.lpstrCustomFilter	= NULL;
-    ofn.nMaxCustFilter		= 0;
-    ofn.nFilterIndex		= 1;
-    ofn.lpstrFile			= fname;
-    ofn.nMaxFile			= 256;
-    ofn.lpstrFileTitle		= NULL;
-    ofn.nMaxFileTitle		= 0;
-    ofn.lpstrInitialDir		= (config.lastPath[0] == 0) ? NULL : config.lastPath;
-    ofn.lpstrTitle			= NULL;
-    ofn.Flags				= OFN_FILEMUSTEXIST | OFN_ENABLESIZING | OFN_EXPLORER;
-    ofn.nFileOffset			= 0;
-    ofn.nFileExtension		= 0;
-    ofn.lpstrDefExt			= NULL;
-    ofn.lCustData			= NULL;
-    ofn.lpfnHook			= NULL;
-    ofn.lpTemplateName		= NULL;
+    strcpy(fname, QStrToCharArr(args.at(0)));
 
-    if (GetOpenFileName(&ofn) == FALSE)
-        return FALSE;
+    if (!QFile(fname).exists())
+        return false;
 
     // strip out path from returned filename
+    /*
     sptr = strchr(fname, '\\');
     if (sptr != NULL)
     {
@@ -741,9 +1334,10 @@ bool biosOpen(void)
 
         *sptr = 0;
     }
+    */
 
     // zap the modified flag
-    biosdata.modified = FALSE;
+    biosdata.modified = false;
 
     // and call the open file handler...
     return biosOpenFile(fname);
