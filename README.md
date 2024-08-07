@@ -1,3 +1,5 @@
+<p align="center"><img src="https://github.com/user-attachments/assets/2222e6f5-8d97-4f95-abf2-e90b797a0240" alt="LibreAward Recovery Dual BIOS"></p>
+
 ## Table Tested Compability
 
 Motherboard | Nuances and problems | Intel ME - AMD PSP | Status
