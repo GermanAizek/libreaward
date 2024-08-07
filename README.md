@@ -1,8 +1,8 @@
 ## Table Tested Compability
 
-Motherboard | Nuances and problems | Status
---- | --- | ---
-GIGABYTE GA-P55-UD3L rev. 2.3 | After firmware and restart, stable work, but it was enough to go into BIOS Setup as after that it no longer started | Partially worked
+Motherboard | Nuances and problems | Intel ME - AMD PSP | Status
+--- | --- | --- | ---
+[GIGABYTE GA-P55-UD3L rev. 2.3 (LGA1156)](https://www.gigabyte.com/Motherboard/GA-P55-UD3L-rev-23#ov) | After firmware and restart, stable work, but it was enough to go into BIOS Setup as after that it no longer started | Removed | Partially worked
 
 ## Recovery BIOS with Dual BIOS (M_BIOS and B_BIOS)
 
