@@ -1,5 +1,7 @@
+#ifndef BIOS_H
+#define BIOS_H
+
 #include "award_exports.h"
-#include "memicmp.h"
 #include "lzh.h"
 
 #include <cstdint>
@@ -8,9 +10,6 @@
 #include <QMessageBox>
 #include <QDebug>
 #include <QStringList>
-
-#ifndef BIOS_H
-#define BIOS_H
 
 #define APP_NAME                    "LibreAward BIOS"
 #define APP_REV                     "1.0.3"

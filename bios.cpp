@@ -1,5 +1,5 @@
 #include "bios.h"
-
+#include "memicmp.h"
 #include <ctime>
 #include <QFile>
 

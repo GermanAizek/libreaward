@@ -21,11 +21,19 @@ add_executable(libreaward
   bios.cpp
   lzh.h
   lzh.cpp
+  lzhEngine/maketbl.cpp
+  lzhEngine/maketree.cpp
+  lzhEngine/huf.cpp
+  lzhEngine/encode.cpp
+  lzhEngine/decode.cpp
+  lzhEngine/io.cpp
+  lzhEngine/lzhEngine.h
   award_exports.h
   types.h
-  memicmp.c
   memicmp.h
 )
+link_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(libreaward Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Widgets)
 
 if(COMMAND qt_create_translation)
