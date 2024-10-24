@@ -2,6 +2,7 @@
 #include "memicmp.h"
 #include <ctime>
 #include <QFile>
+#include <iostream>
 
 typedef enum
 {
@@ -65,18 +66,18 @@ char* QStrToCharArr(const QString& str)
     return str.toLatin1().data();
 }
 
-int SetWindowText(const QString& text)
+int SetWindowText(const std::string& text)
 {
-    qDebug() << text;
+    std::cout << text;
 }
 
 int MessageBox(const QString& text, const QString& titleText, QMessageBox::StandardButtons standartButtons, QMessageBox::StandardButtons defaultButtons)
 {
     QMessageBox msgBox;
     msgBox.setText(text);
-    msgBox.setInformativeText("Notice");
-    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
-    msgBox.setDefaultButton(QMessageBox::Yes);
+    msgBox.setWindowTitle(titleText);
+    msgBox.setStandardButtons(standartButtons);
+    //msgBox.setDefaultButton(defaultButtons);
     return msgBox.exec();
 }
 
