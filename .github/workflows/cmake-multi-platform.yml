@@ -54,14 +54,17 @@ jobs:
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
-    - name: Install QT dependencies
+    - name: Install Qt on Linux
+      if: runner.os == 'Linux'
       run: |
-        if [ "$RUNNER_OS" == "Linux" ]; then
-          sudo apt-get update && sudo apt-get install -y qt6-base-dev qt6-tools ...
-        elif [ "$RUNNER_OS" == "Windows" ]; then
-          choco install qt6-base qt6-tools
-        fi
+        sudo apt-get update
+        sudo apt-get install -y qt6-base-dev qt6-tools
       shell: bash
+    
+    - name: Install Qt on Windows (Chocolatey)
+      if: runner.os == 'Windows'
+      run: choco install qt6-base qt6-tools -y --pre
+      shell: powershell
 
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
